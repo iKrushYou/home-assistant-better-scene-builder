@@ -18,11 +18,21 @@ they land in `scenes.yaml` and show up under
     position, volume, and number values
   - color picker for RGB lights
   - mode buttons for climate and media players
-  - dropdowns for select helpers and fan presets
+  - dropdowns for select helpers, and buttons for fan presets (tap the active
+    one again to clear it)
+  - climate: low/high setpoints for heat/cool range mode, plus preset, fan
+    mode, and swing dropdowns
+  - media players: source dropdown
 - **Live snapshot:** adding an entity starts from its current state, so you can
   set the room the way you want it and then save.
+- **Preview:** apply the scene to your devices without saving it. **Revert**
+  puts every previewed device back the way it was.
 - **Edit existing scenes:** load a scene from the dropdown, change it, then
-  update or delete it.
+  update, duplicate, or delete it.
+- Dropdowns have a **Don't set** option, so a scene can leave that setting
+  alone.
+- Works on phones: one scrolling page with the save bar pinned to the bottom,
+  and a menu button to open the sidebar.
 - Includes YAML-defined helpers that aren't in the entity registry. Skips
   entities that are disabled or hidden in Home Assistant.
 

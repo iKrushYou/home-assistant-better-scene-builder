@@ -124,22 +124,55 @@ function captureState(stateObj) {
     const v = attrs[key];
     if (v !== undefined && v !== null) out[key] = v;
   }
+  // No stateObj here: keep both climate setpoint forms in the captured target so
+  // switching modes in the editor still has the device's real low/high values.
+  // They're pruned when the scene is saved or previewed.
   return sanitizeTarget(stateObj.entity_id, out);
 }
 
+// Climate feature bits (ClimateEntityFeature).
+const CLIMATE_TARGET_TEMP = 1;
+const CLIMATE_TARGET_RANGE = 2;
+
 /**
- * Clean a (possibly edited) target before saving: drop attributes that make no
- * sense for the state, and resolve conflicting light color representations.
+ * Whether a climate target uses a low/high range instead of one temperature:
+ * range-only thermostats always do, and thermostats that support both use the
+ * range in heat_cool mode.
  */
-function sanitizeTarget(entityId, target) {
+function climateUsesRange(t, attrs) {
+  const feat = (attrs && attrs.supported_features) || 0;
+  if (!(feat & CLIMATE_TARGET_RANGE)) return false;
+  return !(feat & CLIMATE_TARGET_TEMP) || t.state === "heat_cool";
+}
+
+/**
+ * Clean a (possibly edited) target before saving or previewing: drop
+ * attributes that make no sense for the state, and resolve conflicting light
+ * color and climate setpoint representations. `stateObj` is the entity's live
+ * state, used to read its supported features; it may be missing.
+ */
+function sanitizeTarget(entityId, target, stateObj) {
   const domain = entityId.split(".")[0];
   const out = { ...target };
 
-  // A preset_mode of "none"/null is a device's idle indicator, not a settable
-  // target - keeping it makes the scene call set_preset_mode with an invalid
-  // value (e.g. "Preset mode none is not valid"). Drop it.
-  if (out.preset_mode == null || String(out.preset_mode).toLowerCase() === "none")
+  // "Don't set" in a dropdown stores "". A preset_mode of "none"/null is a
+  // device's idle indicator, not a settable target - keeping it makes the scene
+  // call set_preset_mode with an invalid value (e.g. "Preset mode none is not
+  // valid"). Drop both.
+  for (const key of ["preset_mode", "fan_mode", "swing_mode", "source"]) {
+    if (out[key] == null || out[key] === "") delete out[key];
+  }
+  if (out.preset_mode != null && String(out.preset_mode).toLowerCase() === "none")
     delete out.preset_mode;
+
+  if (domain === "climate" && stateObj) {
+    if (climateUsesRange(out, stateObj.attributes)) {
+      delete out.temperature;
+    } else {
+      delete out.target_temp_low;
+      delete out.target_temp_high;
+    }
+  }
 
   if (domain === "light") {
     if (out.state !== "on") return { state: out.state };
@@ -179,6 +212,10 @@ class SceneBuilderPanel extends HTMLElement {
     this._currentSceneId = null; // set when editing an existing scene
     this._sceneName = "";
     this._status = null; // {type, text}
+    // entity_id -> state captured just before that entity was first previewed.
+    // Null when nothing is previewed. Kept across scene switches, since it
+    // describes the devices, not the scene; cleared by Revert.
+    this._previewSnapshot = null;
   }
 
   set hass(hass) {
@@ -188,6 +225,12 @@ class SceneBuilderPanel extends HTMLElement {
   }
   get hass() {
     return this._hass;
+  }
+
+  // HA sets `narrow` on panels when the sidebar is collapsed (phones, small
+  // windows). The attribute drives the mobile layout and shows the menu button.
+  set narrow(v) {
+    this.toggleAttribute("narrow", !!v);
   }
 
   async _loadRegistries() {
@@ -331,8 +374,7 @@ class SceneBuilderPanel extends HTMLElement {
       return;
     }
 
-    const entities = {};
-    for (const [eid, t] of this._targets) entities[eid] = sanitizeTarget(eid, t);
+    const entities = this._sceneEntities();
 
     const id = this._currentSceneId || String(Date.now());
     const editing = !!this._currentSceneId;
@@ -351,6 +393,73 @@ class SceneBuilderPanel extends HTMLElement {
       this._status = { type: "error", text: `Save failed: ${err.message || err}` };
       this._refreshDynamic();
     }
+  }
+
+  /** The scene's entities as they'll be written or applied. */
+  _sceneEntities() {
+    const entities = {};
+    for (const [eid, t] of this._targets)
+      entities[eid] = sanitizeTarget(eid, t, this._hass.states[eid]);
+    return entities;
+  }
+
+  /**
+   * Apply the scene to the devices without saving it. The first time each
+   * entity is previewed, its current state is recorded so Revert can put it
+   * back.
+   */
+  async _preview() {
+    if (this._targets.size === 0) return;
+    const snapshot = this._previewSnapshot || new Map();
+    for (const eid of this._targets.keys()) {
+      const st = this._hass.states[eid];
+      if (st && !snapshot.has(eid)) snapshot.set(eid, captureState(st));
+    }
+    this._previewSnapshot = snapshot;
+    try {
+      await this._hass.callService("scene", "apply", {
+        entities: this._sceneEntities(),
+      });
+      this._status = {
+        type: "ok",
+        text: "Previewing. Devices are set to this scene but nothing is saved. Revert puts them back.",
+      };
+    } catch (err) {
+      this._status = { type: "error", text: `Preview failed: ${err.message || err}` };
+    }
+    this._refreshDynamic();
+  }
+
+  /** Put every previewed device back the way it was before its first preview. */
+  async _revert() {
+    if (!this._previewSnapshot) return;
+    const entities = {};
+    for (const [eid, t] of this._previewSnapshot)
+      entities[eid] = sanitizeTarget(eid, t, this._hass.states[eid]);
+    try {
+      await this._hass.callService("scene", "apply", { entities });
+      this._previewSnapshot = null;
+      this._status = { type: "ok", text: "Reverted devices to how they were before the preview." };
+    } catch (err) {
+      this._status = { type: "error", text: `Revert failed: ${err.message || err}` };
+    }
+    this._refreshDynamic();
+  }
+
+  /** Turn the scene being edited into a new, unsaved copy. */
+  _duplicate() {
+    if (!this._currentSceneId) return;
+    const source = this._sceneName;
+    this._currentSceneId = null;
+    this._sceneName = `${source} (copy)`;
+    this._targets = new Map(
+      [...this._targets].map(([eid, t]) => [eid, structuredClone(t)])
+    );
+    this._status = {
+      type: "ok",
+      text: `Copied "${source}". Rename it if you like, then save to create the new scene.`,
+    };
+    this._render();
   }
 
   // ---- membership -------------------------------------------------------
@@ -390,8 +499,13 @@ class SceneBuilderPanel extends HTMLElement {
       <style>${STYLES}</style>
       <div class="wrap">
         <header>
-          <h1>Scene Builder</h1>
-          <p>Pick a room, pull in its entities, dial in each control, and save.</p>
+          <button class="menu" id="menu" title="Menu" aria-label="Open sidebar">
+            <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M3 6h18v2H3V6m0 5h18v2H3v-2m0 5h18v2H3v-2Z"/></svg>
+          </button>
+          <div>
+            <h1>Scene Builder</h1>
+            <p>Pick a room, pull in its entities, dial in each control, and save.</p>
+          </div>
         </header>
         <div class="cols">
           <section class="pane rooms">
@@ -423,19 +537,31 @@ class SceneBuilderPanel extends HTMLElement {
       editing ? ` · editing <em>${escapeHtml(this._sceneName || "scene")}</em>` : ""
     }</div>
             <div class="list cards" id="selected-list">${this._renderSelectedList()}</div>
-            <div class="foot">
-              ${this._status ? `<div class="status ${this._status.type}">${escapeHtml(this._status.text)}</div>` : ""}
-              <div class="btnrow">
-                <button id="save" ${this._targets.size === 0 ? "disabled" : ""}>${
-      editing ? "Update scene" : "Save scene"
-    }</button>
-                <button id="delete" class="danger" ${editing ? "" : "hidden"}>Delete</button>
-              </div>
-            </div>
+            <div class="foot" id="foot">${this._renderFoot()}</div>
           </section>
         </div>
       </div>`;
     this._wireEvents();
+  }
+
+  /** Status line plus action buttons. Re-rendered whenever selection changes. */
+  _renderFoot() {
+    const editing = !!this._currentSceneId;
+    const empty = this._targets.size === 0;
+    const status = this._status
+      ? `<div class="status ${this._status.type}">${escapeHtml(this._status.text)}</div>`
+      : "";
+    return `
+      ${status}
+      <button class="primary" data-action="save" ${empty ? "disabled" : ""}>${
+      editing ? "Update scene" : "Save scene"
+    }</button>
+      <div class="btnrow">
+        <button class="secondary" data-action="preview" ${empty ? "disabled" : ""}>Preview</button>
+        ${this._previewSnapshot ? `<button class="secondary" data-action="revert">Revert</button>` : ""}
+        ${editing ? `<button class="secondary" data-action="duplicate">Duplicate</button>` : ""}
+        ${editing ? `<button class="secondary danger" data-action="delete">Delete</button>` : ""}
+      </div>`;
   }
 
   _renderArea(areaId) {
@@ -576,16 +702,39 @@ class SceneBuilderPanel extends HTMLElement {
         const min = a.min_temp ?? 7;
         const max = a.max_temp ?? 35;
         const step = a.target_temp_step ?? 0.5;
-        return (
-          segmented("set-state", eid, t.state, modes) +
-          sliderRow("Temperature", "temperature", eid, t.temperature ?? min, min, max, step, (v) => `${v}°`)
-        );
+        const deg = (v) => `${v}°`;
+        let html = segmented("set-state", eid, t.state, modes);
+        // Store whatever setpoints the sliders display, so the scene saves
+        // what you see even if you never drag them (e.g. right after switching
+        // into or out of heat_cool).
+        if (climateUsesRange(t, a)) {
+          t.target_temp_low ??= a.target_temp_low ?? clamp((t.temperature ?? min) - 2, min, max);
+          t.target_temp_high ??= a.target_temp_high ?? clamp((t.temperature ?? max) + 2, min, max);
+          html +=
+            sliderRow("Low", "temp-low", eid, t.target_temp_low, min, max, step, deg) +
+            sliderRow("High", "temp-high", eid, t.target_temp_high, min, max, step, deg);
+        } else if ((a.supported_features || 0) & CLIMATE_TARGET_TEMP || t.temperature != null) {
+          t.temperature ??=
+            a.temperature ??
+            (t.target_temp_low != null && t.target_temp_high != null
+              ? Math.round((t.target_temp_low + t.target_temp_high) / 2)
+              : min);
+          html += sliderRow("Temperature", "temperature", eid, t.temperature, min, max, step, deg);
+        }
+        // "none" is how many devices report "no preset"; it isn't settable.
+        const presets = (a.preset_modes || []).filter((p) => String(p).toLowerCase() !== "none");
+        if (presets.length) html += selectRow("Preset", "set-attr:preset_mode", eid, t.preset_mode, presets, true);
+        if (a.fan_modes?.length) html += selectRow("Fan mode", "set-attr:fan_mode", eid, t.fan_mode, a.fan_modes, true);
+        if (a.swing_modes?.length) html += selectRow("Swing", "set-attr:swing_mode", eid, t.swing_mode, a.swing_modes, true);
+        return html;
       }
-      case "media_player":
-        return (
+      case "media_player": {
+        let html =
           segmented("set-state", eid, t.state, ["on", "off", "playing", "paused", "idle"]) +
-          sliderRow("Volume", "mp-volume", eid, Math.round((t.volume_level ?? 0) * 100), 0, 100, 1, (v) => `${v}%`)
-        );
+          sliderRow("Volume", "mp-volume", eid, Math.round((t.volume_level ?? 0) * 100), 0, 100, 1, (v) => `${v}%`);
+        if (a.source_list?.length) html += selectRow("Source", "set-attr:source", eid, t.source, a.source_list, true);
+        return html;
+      }
       case "water_heater": {
         const opts = a.operation_list || [t.state];
         const min = a.min_temp ?? 30;
@@ -635,8 +784,24 @@ class SceneBuilderPanel extends HTMLElement {
       if (v) this._openScene(v);
       else this._newScene();
     });
-    root.getElementById("save")?.addEventListener("click", () => this._save());
-    root.getElementById("delete")?.addEventListener("click", () => this._deleteScene());
+    // HA opens the sidebar when a panel fires hass-toggle-menu. Custom panels
+    // have no header of their own on phones, so this is the only way back.
+    root.getElementById("menu")?.addEventListener("click", () =>
+      this.dispatchEvent(new Event("hass-toggle-menu", { bubbles: true, composed: true }))
+    );
+    // Delegated: the footer is re-rendered whenever selection changes.
+    root.getElementById("foot")?.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn || btn.disabled) return;
+      const actions = {
+        save: () => this._save(),
+        preview: () => this._preview(),
+        revert: () => this._revert(),
+        duplicate: () => this._duplicate(),
+        delete: () => this._deleteScene(),
+      };
+      actions[btn.dataset.action]?.();
+    });
 
     const rooms = root.getElementById("rooms");
     rooms?.addEventListener("click", (e) => {
@@ -685,14 +850,29 @@ class SceneBuilderPanel extends HTMLElement {
     const t = this._targets.get(eid);
     if (!t) return;
     if (btn.dataset.ctrl === "fan-preset") {
+      // Tapping the active preset again clears it, so the scene leaves the
+      // fan's preset alone.
+      if (btn.classList.contains("active")) {
+        delete t.preset_mode;
+        btn.classList.remove("active");
+        return;
+      }
       t.preset_mode = btn.dataset.val;
       t.state = "on";
     } else {
       t.state = btn.dataset.val;
+      // A climate mode change can swap the single setpoint for a low/high
+      // range, so redraw the card's controls.
+      if (eid.startsWith("climate.")) return this._rerenderCard(eid);
     }
     // Highlight the active segment among its siblings.
     for (const sib of btn.parentElement.querySelectorAll(".seg"))
       sib.classList.toggle("active", sib === btn);
+  }
+
+  _rerenderCard(eid) {
+    const card = this.shadowRoot.querySelector(`.card[data-eid="${cssEscape(eid)}"]`);
+    if (card) card.outerHTML = this._renderCard(eid);
   }
 
   _onEditorInput(el) {
@@ -700,6 +880,15 @@ class SceneBuilderPanel extends HTMLElement {
     const t = this._targets.get(eid);
     if (!t) return;
     const ctrl = el.dataset.ctrl;
+
+    // Dropdowns that set a single attribute ("set-attr:<name>"). An empty
+    // value is "Don't set" and removes the attribute from the scene.
+    if (ctrl.startsWith("set-attr:")) {
+      const key = ctrl.slice("set-attr:".length);
+      if (el.value === "") delete t[key];
+      else t[key] = el.value;
+      return;
+    }
 
     switch (ctrl) {
       case "state-onoff":
@@ -739,6 +928,24 @@ class SceneBuilderPanel extends HTMLElement {
       case "temperature":
         t.temperature = parseFloat(el.value);
         break;
+      case "temp-low":
+      case "temp-high": {
+        // Keep low <= high by pushing the other slider along.
+        const v = parseFloat(el.value);
+        const lowKey = ctrl === "temp-low";
+        t[lowKey ? "target_temp_low" : "target_temp_high"] = v;
+        const otherCtrl = lowKey ? "temp-high" : "temp-low";
+        const other = el
+          .closest(".card")
+          ?.querySelector(`[data-ctrl="${otherCtrl}"]`);
+        if (other && (lowKey ? v > Number(other.value) : v < Number(other.value))) {
+          other.value = String(v);
+          t[lowKey ? "target_temp_high" : "target_temp_low"] = v;
+          const otherVal = other.parentElement?.querySelector(".val");
+          if (otherVal) otherVal.textContent = formatCtrlValue(otherCtrl, v);
+        }
+        break;
+      }
       case "mp-volume":
         t.volume_level = parseInt(el.value, 10) / 100;
         break;
@@ -774,16 +981,7 @@ class SceneBuilderPanel extends HTMLElement {
     }
     root.getElementById("selcount").textContent = String(this._targets.size);
     root.getElementById("selected-list").innerHTML = this._renderSelectedList();
-    root.getElementById("save").disabled = this._targets.size === 0;
-
-    const foot = root.querySelector(".foot");
-    foot.querySelector(".status")?.remove();
-    if (this._status) {
-      const div = document.createElement("div");
-      div.className = `status ${this._status.type}`;
-      div.textContent = this._status.text;
-      foot.insertBefore(div, foot.querySelector(".btnrow"));
-    }
+    root.getElementById("foot").innerHTML = this._renderFoot();
   }
 }
 
@@ -824,11 +1022,15 @@ function sliderRow(label, ctrl, eid, value, min, max, step, fmt) {
     </label>`;
 }
 
-function selectRow(label, ctrl, eid, value, options) {
+// allowUnset adds a "Don't set" option (value ""), so the scene can leave that
+// attribute alone.
+function selectRow(label, ctrl, eid, value, options, allowUnset = false) {
+  const unset = value == null || value === "";
   return `
     <label class="ctl">
       <span>${label}</span>
       <select data-ctrl="${ctrl}" data-eid="${escapeAttr(eid)}">
+        ${allowUnset ? `<option value="" ${unset ? "selected" : ""}>Don't set</option>` : ""}
         ${options
           .map(
             (o) =>
@@ -866,6 +1068,8 @@ function formatCtrlValue(ctrl, raw) {
     case "cover-pos":
       return `${v}% open`;
     case "temperature":
+    case "temp-low":
+    case "temp-high":
       return `${v}°`;
     default:
       return `${v}`;
@@ -900,17 +1104,20 @@ function cssEscape(s) {
 
 const STYLES = `
   :host {
-    display: block; height: 100%;
+    display: block; height: 100%; overflow-y: auto;
     background: var(--primary-background-color, #f4f5f7);
     color: var(--primary-text-color, #212121);
     font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif);
   }
   .wrap { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
-  header { padding: 16px 20px 8px; }
+  header { padding: 16px 20px 8px; display: flex; align-items: center; gap: 8px; }
+  .menu { display: none; border: none; background: transparent; color: inherit; cursor: pointer;
+    padding: 8px; margin-left: -8px; border-radius: 50%; }
+  .menu:hover { background: var(--secondary-background-color, rgba(0,0,0,.06)); }
+  :host([narrow]) .menu { display: inline-flex; }
   header h1 { margin: 0; font-size: 22px; font-weight: 500; }
   header p { margin: 4px 0 0; color: var(--secondary-text-color, #727272); font-size: 14px; }
-  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 12px 20px 20px; flex: 1; min-height: 0; }
-  @media (max-width: 780px) { .cols { grid-template-columns: 1fr; } }
+  .cols { display: grid; grid-template-columns: minmax(280px, 2fr) 3fr; gap: 16px; padding: 12px 20px 20px; flex: 1; min-height: 0; }
   .pane { display: flex; flex-direction: column; min-height: 0;
     background: var(--card-background-color, #fff); border-radius: 12px;
     box-shadow: var(--ha-card-box-shadow, 0 2px 4px rgba(0,0,0,.08)); overflow: hidden; }
@@ -942,8 +1149,10 @@ const STYLES = `
   .selcount { padding: 10px 14px 0; font-size: 13px; color: var(--secondary-text-color, #727272); }
 
   /* Control cards */
-  .card-group { display: flex; flex-direction: column; gap: 10px; }
-  .group-head { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  /* Cards flow into as many columns as fit; the room heading spans them all. */
+  .card-group { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 10px; align-items: start; }
+  .group-head { grid-column: 1 / -1; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
     color: var(--secondary-text-color, #888); padding: 6px 2px 0; }
   .card { border-radius: 12px; background: var(--ha-card-background, var(--card-background-color, #fff));
     border: 1px solid var(--divider-color, #e6e6e6); padding: 12px 14px; transition: opacity .15s; }
@@ -987,15 +1196,37 @@ const STYLES = `
     border: 1px solid var(--divider-color, #e0e0e0); background: var(--primary-background-color, #f4f5f7); color: inherit; }
 
   .empty { padding: 24px 14px; text-align: center; color: var(--secondary-text-color, #999); font-size: 14px; }
-  .foot { padding: 12px 14px; border-top: 1px solid var(--divider-color, #e0e0e0); }
-  .btnrow { display: flex; gap: 10px; }
-  .foot button { flex: 1; padding: 12px; font-size: 15px; font-weight: 500; border: none; border-radius: 8px; cursor: pointer;
-    background: var(--primary-color, #03a9f4); color: var(--text-primary-color, #fff); }
+  .foot { padding: 12px 14px; border-top: 1px solid var(--divider-color, #e0e0e0);
+    background: var(--card-background-color, #fff); }
+  .btnrow { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .foot button { padding: 10px 12px; font-size: 14px; font-weight: 500; border-radius: 8px; cursor: pointer; }
   .foot button:disabled { opacity: .5; cursor: not-allowed; }
-  .foot button.danger { flex: 0 0 auto; background: var(--error-color, #db4437); }
+  .foot button.primary { width: 100%; padding: 12px; font-size: 15px; border: none;
+    background: var(--primary-color, #03a9f4); color: var(--text-primary-color, #fff); }
+  .foot button.secondary { flex: 1 1 0; min-width: 80px; background: transparent;
+    border: 1px solid var(--primary-color, #03a9f4); color: var(--primary-color, #03a9f4); }
+  .foot button.secondary:hover:not(:disabled) { background: var(--primary-color, #03a9f4); color: var(--text-primary-color, #fff); }
+  .foot button.secondary.danger { border-color: var(--error-color, #db4437); color: var(--error-color, #db4437); }
+  .foot button.secondary.danger:hover { background: var(--error-color, #db4437); color: #fff; }
   .status { padding: 10px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 10px; }
   .status.ok { background: rgba(67,160,71,.15); color: var(--success-color, #43a047); }
   .status.error { background: rgba(219,68,55,.15); color: var(--error-color, #db4437); }
+
+  /* Phones: one page that scrolls as a whole, with the actions pinned to the
+     bottom. Panes stop being their own scroll containers so the sticky footer
+     sticks to the page. */
+  @media (max-width: 780px) {
+    .wrap { height: auto; min-height: 100%; }
+    header { padding: 12px 12px 4px; }
+    header h1 { font-size: 20px; }
+    .cols { display: flex; flex-direction: column; gap: 12px; padding: 8px 12px 0; }
+    .pane { overflow: visible; }
+    .rooms .list { max-height: 45vh; }
+    .list.cards { overflow: visible; padding: 8px; }
+    .card-group { grid-template-columns: 1fr; }
+    .foot { position: sticky; bottom: 0; z-index: 2; border-radius: 0 0 12px 12px;
+      box-shadow: 0 -4px 12px rgba(0,0,0,.15); padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+  }
 `;
 
 customElements.define("scene-builder-panel", SceneBuilderPanel);
