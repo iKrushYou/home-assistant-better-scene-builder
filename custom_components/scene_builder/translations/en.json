@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Scene Builder",
+        "description": "Adds a Scene Builder page to the sidebar for building and editing scenes room by room. Admin users only."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Scene Builder is already set up."
+    }
+  }
+}

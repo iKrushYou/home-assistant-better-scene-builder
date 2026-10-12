@@ -31,20 +31,15 @@ they land in `scenes.yaml` and show up under
 1. In HACS, open the menu (three dots, top right) > **Custom repositories**.
 2. Add `https://github.com/iKrushYou/home-assistant-better-scene-builder`
    with type **Integration**.
-3. Search for **Scene Builder** and click **Download**.
-4. Add this line to `configuration.yaml`:
-
-   ```yaml
-   scene_builder:
-   ```
-
-5. Restart Home Assistant. **Scene Builder** appears in the sidebar.
+3. Search for **Scene Builder**, click **Download**, and restart Home Assistant.
+4. Go to **Settings > Devices & Services > Add Integration**, search for
+   **Scene Builder**, and click **Submit**. It appears in the sidebar.
 
 ## Manual install
 
 Copy `custom_components/scene_builder` into your config directory's
-`custom_components/` folder, add `scene_builder:` to `configuration.yaml`, and
-restart.
+`custom_components/` folder, restart, then add it from **Settings > Devices &
+Services > Add Integration**.
 
 For Docker with a named volume, copy the folder in through the container:
 
@@ -75,8 +70,16 @@ Bump `version` in `custom_components/scene_builder/manifest.json`, commit, and
 publish a GitHub release tagged `v<version>`. The version is also used to
 cache-bust the panel's JS, so browsers pick up the new code after an update.
 
+## Upgrading from the YAML setup
+
+Versions before 0.8.0 were enabled with a `scene_builder:` line in
+`configuration.yaml`. That line still works: on startup it is imported into a UI
+config entry. Once Scene Builder shows under Devices & Services you can delete
+the line.
+
 ## Uninstall
 
-Remove `scene_builder:` from `configuration.yaml`, remove the integration (via
-HACS, or delete `custom_components/scene_builder/`), and restart. Scenes you
+Delete Scene Builder from **Settings > Devices & Services**, remove any
+`scene_builder:` line from `configuration.yaml`, remove the files (via HACS, or
+delete `custom_components/scene_builder/`), and restart. Scenes you
 created stay in `scenes.yaml`.
