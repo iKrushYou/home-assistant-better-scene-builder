@@ -1,0 +1,11 @@
+{
+  "domain": "scene_builder",
+  "name": "Scene Builder",
+  "version": "0.7.0",
+  "documentation": "https://github.com/iKrushYou/home-assistant-better-scene-builder",
+  "issue_tracker": "https://github.com/iKrushYou/home-assistant-better-scene-builder/issues",
+  "dependencies": ["http", "frontend"],
+  "codeowners": ["@iKrushYou"],
+  "iot_class": "local_push",
+  "integration_type": "service"
+}
