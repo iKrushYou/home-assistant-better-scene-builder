@@ -259,6 +259,18 @@ function isActive(eid, t) {
   );
 }
 
+/**
+ * When a dimmable light is turned on in the editor, give it a brightness so
+ * the scene sets one (and the tile can show it). Uses the light's current
+ * level if it's on, otherwise 100%, which is what the slider shows.
+ */
+function seedLightBrightness(eid, t, live) {
+  if (!eid.startsWith("light.") || t.state !== "on" || t.brightness != null || !live) return;
+  const modes = live.attributes.supported_color_modes || [];
+  if (!modes.some((m) => m !== "onoff")) return;
+  t.brightness = live.state === "on" && live.attributes.brightness != null ? live.attributes.brightness : 255;
+}
+
 /** Accent color for an active tile's icon. */
 function tileColor(eid, t) {
   const domain = eid.split(".")[0];
@@ -696,6 +708,7 @@ class SceneBuilderPanel extends HTMLElement {
       t.state = t.state === "locked" ? "unlocked" : "locked";
     } else if (SWITCH_DOMAINS.has(domain)) {
       t.state = t.state === "on" ? "off" : "on";
+      seedLightBrightness(eid, t, this._hass.states[eid]);
     } else if (domain === "cover") {
       const open = t.current_position != null ? t.current_position > 0 : t.state === "open";
       t.current_position = open ? 0 : 100;
@@ -1133,6 +1146,8 @@ class SceneBuilderPanel extends HTMLElement {
     if (!el || el.tagName === "BUTTON") return;
     this._onEditorInput(el);
     this._dirty = true;
+    const edited = this._targets.get(el.dataset.eid);
+    if (edited) seedLightBrightness(el.dataset.eid, edited, this._hass.states[el.dataset.eid]);
     this._updateTile(el.dataset.eid);
     // Sliders can turn an accessory on (e.g. brightness on a light that was
     // off), so keep the sheet's own switch in step.
