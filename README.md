@@ -1,40 +1,36 @@
 # Better Scene Builder for Home Assistant
 
-A room-first scene editor. The built-in scene editor makes you add entities one
-at a time. This panel lets you pick a room and pull in all of its entities in one
-click, set each entity's target state on a control card, and save.
+A room-first scene editor, laid out like scenes in the Apple Home app. The
+built-in scene editor makes you add entities one at a time. Here you check off
+accessories by room, then set each one from a tile.
 
 Scenes are written through the same REST endpoint the built-in editor uses, so
 they land in `scenes.yaml` and show up under
 **Settings > Automations & Scenes > Scenes** like any other scene.
 
-## Features
+## How it works
 
-- **Room-first picker:** entities are grouped by area, with **Add all** per room
-  and a filter across every entity.
-- **Always-visible control cards** for each entity in the scene:
-  - on/off switches (lights, switches, fans, humidifiers, locks)
-  - sliders for brightness, color temperature, fan speed, humidity, cover
-    position, volume, and number values
-  - color picker for RGB lights
-  - mode buttons for climate and media players
-  - dropdowns for select helpers, and buttons for fan presets (tap the active
-    one again to clear it)
-  - climate: low/high setpoints for heat/cool range mode, plus preset, fan
-    mode, and swing dropdowns
-  - media players: source dropdown
-- **Live snapshot:** adding an entity starts from its current state, so you can
-  set the room the way you want it and then save.
-- **Preview:** apply the scene to your devices without saving it. **Revert**
-  puts every previewed device back the way it was.
-- **Edit existing scenes:** load a scene from the dropdown, change it, then
-  update, duplicate, or delete it.
-- Dropdowns have a **Don't set** option, so a scene can leave that setting
-  alone.
-- Works on phones: one scrolling page with the save bar pinned to the bottom,
-  and a menu button to open the sidebar.
-- Includes YAML-defined helpers that aren't in the entity registry. Skips
-  entities that are disabled or hidden in Home Assistant.
+1. **Scenes:** your scenes as tiles, plus **New scene**.
+2. **Accessories:** every accessory as a tile, grouped by room. Tap a tile to
+   check it off, or use **Select all** for a whole room. Search filters across
+   every room. **Done** takes you to Customize.
+3. **Customize:** the scene's accessories as tiles, grouped by room, each
+   showing what the scene will set it to.
+   - Tap a tile's **icon** to turn it on or off.
+   - Tap the **tile** to open its settings: brightness, color temperature,
+     color, fan speed or preset, thermostat mode and setpoints (including
+     heat/cool ranges), preset, fan and swing modes, cover position, volume and
+     source, and select or number values.
+   - **Preview** applies the scene to your accessories without saving it.
+     **Revert** puts them back the way they were.
+   - **Duplicate scene** and **Delete scene** are at the bottom.
+
+Adding an accessory starts from its current state, so you can set the room the
+way you want it and then save. Dropdowns have a **Don't set** option so a scene
+can leave that setting alone, and tapping the active fan preset again clears it.
+
+Includes YAML-defined helpers that aren't in the entity registry. Skips
+entities that are disabled or hidden in Home Assistant.
 
 ## Install with HACS (recommended)
 
